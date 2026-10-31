@@ -1,0 +1,12 @@
+# Gradle
+.gradle/
+gradle/
+gradlew
+gradlew.bat
+
+# Kotlin
+.kotlin/
+
+# Builds
+build/
+app/build
