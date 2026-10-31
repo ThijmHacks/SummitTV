@@ -7,8 +7,6 @@ import android.view.WindowManager
 
 class MainActivity : Activity() {
 
-    private lateinit var screensaver: ScreensaverView
-
     @Suppress("DEPRECATION")
     private fun enableImmersiveMode() {
         window.decorView.systemUiVisibility =
@@ -29,8 +27,7 @@ class MainActivity : Activity() {
 
         enableImmersiveMode()
 
-        screensaver = ScreensaverView(this)
-        setContentView(screensaver)
+        setContentView(SummitHomeView(this))
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
