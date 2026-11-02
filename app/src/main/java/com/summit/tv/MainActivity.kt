@@ -15,7 +15,7 @@ class MainActivity : Activity() {
 
     private var isScreensaver = false
 
-    private val inactivityTime = 20 * 1000L
+    private val inactivityTime = 120 * 1000L
 
     private val screensaverRunnable = Runnable {
         showScreensaver()

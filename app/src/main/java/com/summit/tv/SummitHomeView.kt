@@ -2,7 +2,12 @@ package com.summit.tv
 
 import android.animation.ValueAnimator
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ResolveInfo
 import android.graphics.*
+import android.graphics.drawable.Drawable
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.os.Handler
@@ -13,15 +18,34 @@ import java.util.Locale
 
 class SummitHomeView(context: Context) : View(context) {
 
+    private data class SummitApp(
+        val packageName: String,
+        val label: String,
+        val icon: Drawable,
+        val activityName: String,
+        val category: String
+    )
+
+    private val packageManager = context.packageManager
+
+    private val preferences = context.getSharedPreferences(
+        "summit_preferences",
+        Context.MODE_PRIVATE
+    )
+
+    private val apps = mutableListOf<SummitApp>()
+    private val fifoApps = mutableListOf<String>()
+    private val tileBounds = mutableListOf<RectF>()
+
+    private var selectedIndex = 0
+
     private val backBitmap = loadAsset("mountain_back.png")
     private val frontBitmap = loadAsset("mountain_front.png")
     private val referenceBitmap = backBitmap ?: frontBitmap
 
     private val handler = Handler(Looper.getMainLooper())
 
-    // 0 = Home, 1 = Screensaver
     private var transitionProgress = 0f
-
     private var animator: ValueAnimator? = null
 
     private val bitmapPaint = Paint(
@@ -35,24 +59,14 @@ class SummitHomeView(context: Context) : View(context) {
         setShadowLayer(12f, 0f, 4f, Color.argb(45, 0, 0, 0))
     }
 
-    private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        typeface = Typeface.create("sans-serif", Typeface.BOLD)
-    }
-
-    private val subtitlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(155, 165, 175)
-        typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-    }
-
     private val tilePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.rgb(35, 43, 52)
     }
 
-    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.create("sans-serif", Typeface.BOLD)
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
     }
 
     private val clockFormat =
@@ -65,6 +79,16 @@ class SummitHomeView(context: Context) : View(context) {
         }
     }
 
+    init {
+        isFocusable = true
+        isFocusableInTouchMode = true
+
+        discoverApps()
+        loadFifoApps()
+
+        requestFocus()
+    }
+
     private fun loadAsset(name: String): Bitmap? {
         return try {
             context.assets.open(name).use {
@@ -75,17 +99,227 @@ class SummitHomeView(context: Context) : View(context) {
         }
     }
 
-    // Animate into screensaver
+    // APP DISCOVERY
+
+    private fun discoverApps() {
+
+        apps.clear()
+
+        val discovered = linkedMapOf<String, SummitApp>()
+
+        val intents = listOf(
+            Intent(Intent.ACTION_MAIN).addCategory(
+                Intent.CATEGORY_LEANBACK_LAUNCHER
+            ) to Intent.CATEGORY_LEANBACK_LAUNCHER,
+
+            Intent(Intent.ACTION_MAIN).addCategory(
+                Intent.CATEGORY_LAUNCHER
+            ) to Intent.CATEGORY_LAUNCHER
+        )
+
+        for ((intent, category) in intents) {
+
+            val results: List<ResolveInfo> =
+                packageManager.queryIntentActivities(intent, 0)
+
+            for (resolve in results) {
+
+                val activity = resolve.activityInfo ?: continue
+                val packageName = activity.packageName
+
+                if (packageName == context.packageName) continue
+                if (discovered.containsKey(packageName)) continue
+
+                try {
+                    discovered[packageName] = SummitApp(
+                        packageName = packageName,
+                        label = resolve.loadLabel(packageManager).toString(),
+                        icon = resolve.loadIcon(packageManager),
+                        activityName = activity.name,
+                        category = category
+                    )
+                } catch (_: Exception) {
+                    // Skip unavailable applications.
+                }
+            }
+        }
+
+        apps.addAll(
+            discovered.values.sortedBy {
+                it.label.lowercase(Locale.getDefault())
+            }
+        )
+    }
+
+    // FIFO SYSTEM
+
+    private fun loadFifoApps() {
+
+        val saved = preferences.getString("fifo_apps", null)
+
+        fifoApps.clear()
+
+        if (saved != null) {
+
+            fifoApps.addAll(
+                saved.split("\n").filter { it.isNotBlank() }
+            )
+
+            fifoApps.retainAll(
+                apps.map { it.packageName }.toSet()
+            )
+
+        } else {
+
+            fifoApps.addAll(
+                apps.take(5).map { it.packageName }
+            )
+        }
+
+        for (app in apps) {
+
+            if (fifoApps.size >= 5) break
+
+            if (app.packageName !in fifoApps) {
+                fifoApps.add(app.packageName)
+            }
+        }
+
+        saveFifoApps()
+    }
+
+    private fun saveFifoApps() {
+
+        preferences.edit()
+            .putString("fifo_apps", fifoApps.joinToString("\n"))
+            .apply()
+    }
+
+    private fun addToFifo(packageName: String) {
+
+        if (packageName in fifoApps) return
+
+        if (fifoApps.size >= 5) {
+            fifoApps.removeAt(0)
+        }
+
+        fifoApps.add(0, packageName)
+
+        saveFifoApps()
+        invalidate()
+    }
+
+    private fun getFifoApp(index: Int): SummitApp? {
+
+        if (index !in fifoApps.indices) return null
+
+        val packageName = fifoApps[index]
+
+        return apps.firstOrNull {
+            it.packageName == packageName
+        }
+    }
+
+    // APP LAUNCHING
+
+    private fun launchApp(app: SummitApp) {
+
+        try {
+
+            addToFifo(app.packageName)
+
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+
+                addCategory(app.category)
+
+                setClassName(
+                    app.packageName,
+                    app.activityName
+                )
+
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            context.startActivity(intent)
+
+        } catch (e: Exception) {
+
+            android.util.Log.e(
+                "Summit",
+                "Could not launch ${app.label}",
+                e
+            )
+        }
+    }
+
+    // REMOTE CONTROL
+
+    override fun onKeyDown(
+        keyCode: Int,
+        event: KeyEvent?
+    ): Boolean {
+
+        when (keyCode) {
+
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                selectedIndex = (selectedIndex + 1).coerceAtMost(4)
+                invalidate()
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
+                invalidate()
+                return true
+            }
+
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER -> {
+                getFifoApp(selectedIndex)?.let {
+                    launchApp(it)
+                }
+                return true
+            }
+        }
+
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+
+        if (event.action == MotionEvent.ACTION_UP) {
+
+            tileBounds.forEachIndexed { index, rect ->
+
+                if (rect.contains(event.x, event.y)) {
+
+                    selectedIndex = index
+
+                    getFifoApp(index)?.let {
+                        launchApp(it)
+                    }
+
+                    invalidate()
+                    return true
+                }
+            }
+        }
+
+        return true
+    }
+
+    // SCREENSAVER TRANSITIONS
+
     fun showScreensaver() {
         animateTo(1f)
     }
 
-    // Animate back into launcher
     fun showHome() {
         animateTo(0f)
     }
 
     private fun animateTo(target: Float) {
+
         animator?.cancel()
 
         val start = transitionProgress
@@ -114,7 +348,10 @@ class SummitHomeView(context: Context) : View(context) {
         super.onDetachedFromWindow()
     }
 
+    // DRAWING
+
     override fun onDraw(canvas: Canvas) {
+
         super.onDraw(canvas)
 
         val w = width.toFloat()
@@ -126,33 +363,30 @@ class SummitHomeView(context: Context) : View(context) {
 
         canvas.drawColor(Color.BLACK)
 
-        // Smoothly change mountain area and zoom.
         val mountainHeight = lerp(h * 0.76f, h, p)
         val zoom = lerp(1.20f, 1.00f, p)
 
-        // 1. Background mountain
         if (backBitmap != null) {
             drawMountain(canvas, backBitmap, w, h, mountainHeight, zoom)
         } else {
             drawFallbackBackground(canvas, w, h)
         }
 
-        // 2. Clock grows during transition.
         drawClock(canvas, w, h, p)
 
-        // 3. Foreground mountain
         if (frontBitmap != null) {
             drawMountain(canvas, frontBitmap, w, h, mountainHeight, zoom)
         }
 
-        // 4. Gradient retreats downwards and disappears.
         drawGradient(canvas, w, h, p)
-
-        // 5. Apps fade out.
         drawAppsSection(canvas, w, h, p)
     }
 
-    private fun lerp(start: Float, end: Float, progress: Float): Float {
+    private fun lerp(
+        start: Float,
+        end: Float,
+        progress: Float
+    ): Float {
         return start + (end - start) * progress
     }
 
@@ -164,6 +398,7 @@ class SummitHomeView(context: Context) : View(context) {
         mountainHeight: Float,
         zoom: Float
     ) {
+
         val reference = referenceBitmap ?: bitmap
 
         val scale = maxOf(
@@ -196,6 +431,7 @@ class SummitHomeView(context: Context) : View(context) {
         h: Float,
         progress: Float
     ) {
+
         clockPaint.textSize = h * lerp(0.125f, 0.30f, progress)
 
         val time = clockFormat.format(Date())
@@ -214,16 +450,15 @@ class SummitHomeView(context: Context) : View(context) {
         )
     }
 
-    
     private fun drawGradient(
         canvas: Canvas,
         w: Float,
         h: Float,
         progress: Float
     ) {
-        // Keep gradient fully visible in launcher mode.
-        // Fade it out during screensaver transition.
-        val alpha = (255f * (1f - progress)).toInt()
+
+        val alpha = (255f * (1f - progress))
+            .toInt()
             .coerceIn(0, 255)
 
         if (alpha == 0) return
@@ -251,6 +486,7 @@ class SummitHomeView(context: Context) : View(context) {
         canvas.drawRect(0f, h * 0.35f, w, h, paint)
     }
 
+    // FIVE WIDE RECTANGULAR APP TILES
 
     private fun drawAppsSection(
         canvas: Canvas,
@@ -258,6 +494,7 @@ class SummitHomeView(context: Context) : View(context) {
         h: Float,
         progress: Float
     ) {
+
         val alpha = (255 * (1f - progress)).toInt()
 
         if (alpha <= 0) return
@@ -265,72 +502,91 @@ class SummitHomeView(context: Context) : View(context) {
         val saveCount = canvas.save()
 
         canvas.translate(0f, h * 0.06f * progress)
-        canvas.saveLayerAlpha(
-            0f, 0f, w, h, alpha
-        )
 
-        val left = w * 0.075f
+        canvas.saveLayerAlpha(0f, 0f, w, h, alpha)
 
-        titlePaint.alpha = alpha
-        titlePaint.textSize = h * 0.030f
+        // Wide rectangular tiles, original height.
+        val margin = w * 0.07f
+        val gap = w * 0.015f
 
-        canvas.drawText(
-            "Favourites",
-            left,
-            h * 0.765f,
-            titlePaint
-        )
+        val tileHeight = h * 0.115f
+        val availableWidth = w - margin * 2f
+        val tileWidth = (availableWidth - gap * 4f) / 5f
 
-        val tileSize = h * 0.105f
-        val gap = h * 0.025f
-        val top = h * 0.805f
+        val top = h * 0.825f
 
-        val icons = listOf("▶", "♪", "⌂", "⚙")
+        tileBounds.clear()
 
-        tilePaint.alpha = alpha
-        iconPaint.alpha = alpha
-        iconPaint.textSize = tileSize * 0.43f
+        for (index in 0 until 5) {
 
-        icons.forEachIndexed { index, symbol ->
-
-            val x = left + index * (tileSize + gap)
+            val x = margin + index * (tileWidth + gap)
 
             val tile = RectF(
                 x,
                 top,
-                x + tileSize,
-                top + tileSize
+                x + tileWidth,
+                top + tileHeight
             )
+
+            tileBounds.add(
+                RectF(
+                    tile.left - 8f,
+                    tile.top - 8f,
+                    tile.right + 8f,
+                    tile.bottom + 8f
+                )
+            )
+
+            tilePaint.alpha = (150f * (alpha / 255f)).toInt()
 
             canvas.drawRoundRect(
                 tile,
-                18f,
-                18f,
+                tileHeight * 0.22f,
+                tileHeight * 0.22f,
                 tilePaint
             )
 
-            val metrics = iconPaint.fontMetrics
+            // Selection outline.
+            if (index == selectedIndex) {
 
-            val baseline = top + tileSize / 2f -
-                (metrics.ascent + metrics.descent) / 2f
+                selectionPaint.alpha = alpha
+                selectionPaint.strokeWidth = 4f
 
-            canvas.drawText(
-                symbol,
-                x + tileSize / 2f,
-                baseline,
-                iconPaint
-            )
+                canvas.drawRoundRect(
+                    RectF(
+                        tile.left - 5f,
+                        tile.top - 5f,
+                        tile.right + 5f,
+                        tile.bottom + 5f
+                    ),
+                    tileHeight * 0.24f,
+                    tileHeight * 0.24f,
+                    selectionPaint
+                )
+            }
+
+            // Actual app icon, centred and proportional.
+            val app = getFifoApp(index)
+
+            if (app != null) {
+
+                val iconSize = tileHeight * 0.76f
+
+                val iconLeft = x + (tileWidth - iconSize) / 2f
+                val iconTop = top + (tileHeight - iconSize) / 2f
+
+                app.icon.setBounds(
+                    iconLeft.toInt(),
+                    iconTop.toInt(),
+                    (iconLeft + iconSize).toInt(),
+                    (iconTop + iconSize).toInt()
+                )
+
+                app.icon.alpha = alpha
+                app.icon.draw(canvas)
+                app.icon.alpha = 255
+            }
         }
-
-        subtitlePaint.alpha = alpha
-        subtitlePaint.textSize = h * 0.020f
-
-        canvas.drawText(
-            "Your apps will appear here",
-            left,
-            h * 0.965f,
-            subtitlePaint
-        )
 
         canvas.restore()
         canvas.restoreToCount(saveCount)
@@ -341,6 +597,7 @@ class SummitHomeView(context: Context) : View(context) {
         w: Float,
         h: Float
     ) {
+
         val gradient = LinearGradient(
             0f, 0f, 0f, h * 0.76f,
             Color.rgb(30, 48, 65),
